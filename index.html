@@ -261,7 +261,7 @@ textarea{min-height:74px;resize:vertical;font-family:ui-monospace,SFMono-Regular
         Continue with Microsoft</button>
     </div>
     <button class="linkbtn hidden" id="gateGhPat">Use a personal access token instead</button>
-    <button class="linkbtn" id="gateAzTenant">Azure rejected your account? Set your directory</button>
+    
     <p class="fine" id="gateFine"></p>
   </section>
 
@@ -358,6 +358,13 @@ const AZ_CLIENT_ID = '1b24866a-ca8b-4551-b1ed-647aadb339c5';
 const AZ_TENANT_DEFAULT = 'organizations';
 const azTenant   = () => store.get(K.aztenant) || AZ_TENANT_DEFAULT;
 const azAuthority = () => `https://login.microsoftonline.com/${azTenant()}`;
+
+/* Nobody should ever be asked to go and find a tenant GUID — `az login` doesn't,
+   so neither do we. If an authority turns the account away, silently try the
+   next rung instead of showing the user a dead end. The tenant is then learned
+   from the subscription list and remembered. */
+const AZ_LADDER = ['organizations', 'common'];
+const azRetryable = m => /AADSTS50020|AADSTS500200|AADSTS90072|personal account|not exist in tenant/i.test(m || '');
 const AZ_SCOPE     = 'https://management.azure.com/user_impersonation offline_access openid profile';
 const REDIRECT     = location.origin + location.pathname;
 const REFRESH_MS   = 60_000;
@@ -884,6 +891,9 @@ async function renderAzure() {
       const subs = await AZ.subs();
       if (!subs.length) throw new Error('No Azure subscriptions visible to this account.');
       subId = subs[0].subscriptionId; store.set(K.sub, subId);
+      /* Learn the real tenant from the subscription itself, the way `az login`
+         does — so renewals target it directly and the user never sees a GUID. */
+      if (subs[0].tenantId) store.set(K.aztenant, subs[0].tenantId);
     }
   } catch (e) {
     $('#azMeta').innerHTML = `<span style="color:var(--crit)">${esc(e.message)}</span>`;
@@ -1261,7 +1271,7 @@ async function openSettings(tab = 'main') {
   $('#mGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
   $('#mGhApp').onclick = () => openSettings('ghapp');
   $('#mRepos') && ($('#mRepos').onclick = () => openSettings('repos'));
-  $('#mAz').onclick = () => openSettings('azlogin');
+  $('#mAz').onclick = () => AZ.login();
   $('#mAzCfg') && ($('#mAzCfg').onclick = () => openSettings('azure'));
   $('#signout').onclick = () => {
     if (!confirm('Erase the GitHub token, the Azure session and all settings from this browser?')) return;
@@ -1304,8 +1314,8 @@ $('#btnSettings').onclick = () => openSettings('main');
 $('#btnRepos').onclick = () => { repoCache = null; openSettings('repos'); };
 $('#gateGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
 $('#gateGhPat').onclick = () => openSettings('github');
-$('#gateAzTenant').onclick = () => openSettings('azlogin');
-$('#gateAz').onclick = () => openSettings('azlogin');
+
+$('#gateAz').onclick = () => AZ.login();
 
 addEventListener('resize', () => {
   clearTimeout(window._rz);
@@ -1337,7 +1347,18 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
       } else if (st.startsWith('az.')) {
         await AZ.complete(qs); toast('Azure connected');
       }
-    } catch (e) { toast(e.message, 6000); }
+    } catch (e) {
+      /* Walk the authority ladder automatically rather than telling the user to
+         go hunt for a tenant id. Only the last rung ever surfaces an error. */
+      const rung = AZ_LADDER.indexOf(azTenant());
+      if (azRetryable(e.message) && rung > -1 && rung < AZ_LADDER.length - 1) {
+        store.set(K.aztenant, AZ_LADDER[rung + 1]);
+        history.replaceState({}, '', REDIRECT);
+        toast('Trying your organisation directory…');
+        return AZ.login();
+      }
+      toast(e.message, 6000);
+    }
     history.replaceState({}, '', REDIRECT);
   }
   paintGate();
