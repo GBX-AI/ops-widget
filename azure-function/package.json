@@ -1,0 +1,13 @@
+{
+  "name": "ops-widget-auth",
+  "version": "1.0.0",
+  "description": "GitHub OAuth token exchange for the ops-widget dashboard. Stateless; stores and logs nothing.",
+  "main": "src/functions/*.js",
+  "private": true,
+  "scripts": {
+    "start": "func start"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0"
+  }
+}
