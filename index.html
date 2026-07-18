@@ -318,7 +318,10 @@ if (window.parent !== window && /[?#].*code=|[?#].*error=/.test(location.href)) 
 
 /* ---------------------------------------------------------------- constants */
 const AZ_CLIENT_ID = '1b24866a-ca8b-4551-b1ed-647aadb339c5';
-const AZ_AUTHORITY = 'https://login.microsoftonline.com/organizations';
+/* /common — not /organizations. Azure subscriptions are frequently owned by a
+   personal Microsoft account (outlook.com/live.com), and /organizations rejects
+   those outright with "You can't sign in here with a personal account". */
+const AZ_AUTHORITY = 'https://login.microsoftonline.com/common';
 const AZ_SCOPE     = 'https://management.azure.com/user_impersonation offline_access openid profile';
 const REDIRECT     = location.origin + location.pathname;
 const REFRESH_MS   = 60_000;
