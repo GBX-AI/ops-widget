@@ -1,0 +1,11 @@
+name = "ops-widget-auth"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# GITHUB_CLIENT_ID is not a secret — it is public in the widget too.
+[vars]
+GITHUB_CLIENT_ID = "REPLACE_WITH_YOUR_GITHUB_APP_CLIENT_ID"
+
+# GITHUB_CLIENT_SECRET is NEVER put here. Set it once with:
+#   npx wrangler secret put GITHUB_CLIENT_SECRET
+# It is stored encrypted by Cloudflare and is not readable back.

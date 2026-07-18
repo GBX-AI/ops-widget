@@ -174,6 +174,9 @@ svg.plot{display:block;width:100%;overflow:visible;touch-action:pan-y}
 .gate p{color:var(--ink2);font-size:14px;margin:0 0 18px}
 .gate .row{display:flex;flex-direction:column;gap:9px}
 .gate .fine{font-size:12px;color:var(--muted);margin-top:16px;line-height:1.55}
+.linkbtn{background:none;border:0;padding:8px 4px;margin-top:10px;cursor:pointer;
+  font-size:12.5px;color:var(--muted);text-decoration:underline;text-underline-offset:3px}
+.linkbtn:hover{color:var(--ink2)}
 .empty{padding:30px 20px;text-align:center;color:var(--muted);font-size:13.5px}
 .empty .em{font-size:28px;display:block;margin-bottom:8px}
 
@@ -242,10 +245,13 @@ textarea{min-height:74px;resize:vertical;font-family:ui-monospace,SFMono-Regular
     <h2>Connect your sources</h2>
     <p>Everything stays in <b>this browser only</b>. No server, no secrets in the page.</p>
     <div class="row">
-      <button class="iconbtn primary" id="gateGh" style="height:44px">Connect GitHub</button>
-      <button class="iconbtn" id="gateAz" style="height:44px">Connect Azure</button>
+      <button class="iconbtn primary" id="gateGh" style="height:46px"></button>
+      <button class="iconbtn" id="gateAz" style="height:46px">
+        <svg viewBox="0 0 23 23" width="16" height="16" aria-hidden="true"><path fill="#f35325" d="M1 1h10v10H1z"/><path fill="#81bc06" d="M12 1h10v10H12z"/><path fill="#05a6f0" d="M1 12h10v10H1z"/><path fill="#ffba08" d="M12 12h10v10H12z"/></svg>
+        Continue with Microsoft</button>
     </div>
-    <p class="fine">GitHub uses a personal access token you paste once. Azure uses Microsoft sign-in (PKCE) — no password or secret is ever stored here.</p>
+    <button class="linkbtn hidden" id="gateGhPat">Use a personal access token instead</button>
+    <p class="fine" id="gateFine"></p>
   </section>
 
   <!-- GITHUB -->
@@ -317,6 +323,15 @@ if (window.parent !== window && /[?#].*code=|[?#].*error=/.test(location.href)) 
 }
 
 /* ---------------------------------------------------------------- constants */
+
+/* GitHub sign-in. Both values are PUBLIC — the client_id identifies the app and
+   the proxy only ever holds the secret server-side (see /worker).
+   GitHub supports neither PKCE nor CORS on its OAuth endpoints, so the
+   code->token swap cannot happen in the browser; GH_AUTH_PROXY does that one
+   call and nothing else. Leave these blank and the widget falls back to a PAT. */
+const GH_CLIENT_ID_DEFAULT  = '';
+const GH_AUTH_PROXY_DEFAULT = '';
+
 const AZ_CLIENT_ID = '1b24866a-ca8b-4551-b1ed-647aadb339c5';
 /* /common — not /organizations. Azure subscriptions are frequently owned by a
    personal Microsoft account (outlook.com/live.com), and /organizations rejects
@@ -328,7 +343,8 @@ const REFRESH_MS   = 60_000;
 
 const K = {
   gh:'gbxops.gh', repos:'gbxops.repos', az:'gbxops.az', pkce:'gbxops.pkce',
-  sub:'gbxops.sub', credit:'gbxops.credit', theme:'gbxops.theme'
+  sub:'gbxops.sub', credit:'gbxops.credit', theme:'gbxops.theme',
+  ghcfg:'gbxops.ghcfg', oauth:'gbxops.oauth'
 };
 
 /* ------------------------------------------------------------------- store */
@@ -396,23 +412,97 @@ function runState(r) {
 
 /* ======================================================= GITHUB ============ */
 const GH = {
-  token: () => store.get(K.gh),
+  /* deployment config, overridable at runtime so anyone can point at their own app */
+  cfg() {
+    const o = store.get(K.ghcfg, {}) || {};
+    return {
+      clientId: o.clientId || GH_CLIENT_ID_DEFAULT,
+      proxy: (o.proxy || GH_AUTH_PROXY_DEFAULT || '').replace(/\/+$/, '')
+    };
+  },
+  canOAuth()  { const c = GH.cfg(); return !!(c.clientId && c.proxy); },
+  connected() { return !!store.get(K.gh); },
+
+  login() {
+    const c = GH.cfg();
+    if (!GH.canOAuth()) throw new Error('GitHub sign-in is not configured on this deployment.');
+    /* state is prefixed so the shared redirect URI can tell GitHub's callback
+       apart from Azure's — both come back as ?code= on the same page. */
+    const state = 'gh.' + b64url(crypto.getRandomValues(new Uint8Array(12)));
+    store.set(K.oauth, { state });
+    location.assign('https://github.com/login/oauth/authorize?' + new URLSearchParams({
+      client_id: c.clientId, redirect_uri: REDIRECT, state
+    }));
+  },
+
+  save(j) {
+    store.set(K.gh, {
+      at: j.access_token,
+      rt: j.refresh_token || null,
+      /* GitHub Apps may issue expiring user tokens; OAuth Apps/PATs do not */
+      exp: j.expires_in ? Date.now() + (j.expires_in - 120) * 1000 : null
+    });
+  },
+
+  async complete(p) {
+    if (p.get('error')) throw new Error(p.get('error_description') || p.get('error'));
+    const saved = store.get(K.oauth); store.del(K.oauth);
+    if (!saved || p.get('state') !== saved.state) throw new Error('GitHub sign-in state mismatch — try again.');
+    const res = await fetch(GH.cfg().proxy + '/exchange', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: p.get('code'), redirect_uri: REDIRECT })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.error || !j.access_token)
+      throw new Error(j.error_description || j.error || 'GitHub token exchange failed');
+    GH.save(j);
+  },
+
+  async accessToken() {
+    const t = store.get(K.gh);
+    if (!t) throw new Error('GitHub not connected');
+    if (typeof t === 'string') return t;              // pasted PAT — never expires
+    if (!t.exp || Date.now() < t.exp) return t.at;
+    if (!t.rt) { store.del(K.gh); throw new Error('GitHub session expired — sign in again.'); }
+    const res = await fetch(GH.cfg().proxy + '/refresh', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: t.rt })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.error || !j.access_token) {
+      store.del(K.gh); throw new Error('GitHub session expired — sign in again.');
+    }
+    GH.save(j); return j.access_token;
+  },
+
   async api(path, opts = {}) {
+    const at = await GH.accessToken();
     const res = await fetch(`https://api.github.com${path}`, {
       ...opts,
       headers: {
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
-        Authorization: `Bearer ${GH.token()}`,
+        Authorization: `Bearer ${at}`,
         ...(opts.headers || {})
       }
     });
-    if (res.status === 401) { store.del(K.gh); throw new Error('GitHub token rejected — reconnect.'); }
+    if (res.status === 401) { store.del(K.gh); throw new Error('GitHub authorisation rejected — sign in again.'); }
     if (!res.ok) throw new Error(`GitHub ${res.status}: ${(await res.text()).slice(0, 140)}`);
     return res.json();
   },
   async me()     { return GH.api('/user'); },
-  async myRepos(){ return GH.api('/user/repos?per_page=100&sort=pushed&affiliation=owner,organization_member'); },
+  /* A GitHub App user token only sees repos the app is installed on, which
+     /user/repos does not report — fall through to the installation list. */
+  async myRepos() {
+    const direct = await GH.api('/user/repos?per_page=100&sort=pushed&affiliation=owner,organization_member').catch(() => null);
+    if (direct?.length) return direct;
+    const inst = await GH.api('/user/installations').catch(() => null);
+    if (!inst?.installations?.length) return direct || [];
+    const lists = await Promise.all(inst.installations.map(i =>
+      GH.api(`/user/installations/${i.id}/repositories?per_page=100`)
+        .then(d => d.repositories || []).catch(() => [])));
+    return lists.flat();
+  },
   /* latest run per workflow + the last successful run per workflow */
   async repoRuns(full) {
     const d = await GH.api(`/repos/${full}/actions/runs?per_page=50`);
@@ -677,7 +767,7 @@ function setHealth(state) {
 
 async function renderGitHub() {
   const sec = $('#secGh'), host = $('#repos');
-  if (!GH.token()) { sec.classList.add('hidden'); return; }
+  if (!GH.connected()) { sec.classList.add('hidden'); return; }
   sec.classList.remove('hidden');
 
   const repos = store.get(K.repos, []);
@@ -888,7 +978,7 @@ async function refreshAll(manual) {
   b.disabled = true; svg.classList.add('spinning');
   try {
     const jobs = [];
-    if (GH.token()) jobs.push(renderGitHub().catch(e => toast(e.message)));
+    if (GH.connected()) jobs.push(renderGitHub().catch(e => toast(e.message)));
     if (AZ.connected()) jobs.push(renderAzure().catch(e => {
       if (/not connected|silent|AADSTS/i.test(e.message)) {
         toast('Azure session expired — reconnect from Settings.');
@@ -909,13 +999,17 @@ let repoCache = null;
 
 async function openSettings(tab = 'main') {
   const body = $('#dlgBody'), foot = $('#dlgFoot');
-  $('#dlgTitle').textContent = { main: 'Settings', repos: 'Choose repositories', azure: 'Azure', github: 'Connect GitHub' }[tab] || 'Settings';
+  $('#dlgTitle').textContent = { main: 'Settings', repos: 'Choose repositories', azure: 'Azure',
+    github: 'Connect GitHub', ghapp: 'Your own GitHub App' }[tab] || 'Settings';
   body.innerHTML = ''; foot.innerHTML = '';
   if (!dlg.open) dlg.showModal();
 
   /* ---------- GitHub token ---------- */
   if (tab === 'github') {
     body.innerHTML = `
+      ${GH.canOAuth() ? `<div class="note" style="margin-bottom:15px">You don't need this —
+        <a href="#" id="useOauth">sign in with GitHub</a> instead and skip creating a token.
+        A token is only worth pasting if you want to scope access more tightly than the App does.</div>` : ''}
       <div class="fld">
         <label for="pat">GitHub personal access token</label>
         <div class="hint">Needs <b>repo</b> scope (private repos) or just <b>public_repo</b>. A fine-grained token works too — give it <b>Actions: read-only</b> + <b>Metadata: read-only</b>.
@@ -924,6 +1018,7 @@ async function openSettings(tab = 'main') {
       </div>
       <div class="note">Stored only in this browser's localStorage. It is never sent anywhere except <code>api.github.com</code>. Use <b>Sign out</b> to erase it.</div>`;
     foot.innerHTML = `<button class="iconbtn" data-close>Cancel</button><button class="iconbtn primary" id="saveGh">Connect</button>`;
+    $('#useOauth') && ($('#useOauth').onclick = e => { e.preventDefault(); GH.login(); });
     $('#saveGh').onclick = async () => {
       const v = $('#pat').value.trim();
       if (!v) return toast('Paste a token first');
@@ -934,6 +1029,37 @@ async function openSettings(tab = 'main') {
         repoCache = null;
         openSettings('repos');
       } catch (e) { store.del(K.gh); toast(e.message); }
+    };
+    return;
+  }
+
+  /* ---------- point at a self-hosted GitHub App + worker ---------- */
+  if (tab === 'ghapp') {
+    const c = store.get(K.ghcfg, {}) || {};
+    body.innerHTML = `
+      <div class="note">Optional. This deployment already ships a GitHub App, so you can ignore this
+        unless you'd rather sign in through your own — for example to keep the token exchange entirely
+        on infrastructure you control.</div>
+      <div class="fld" style="margin-top:15px">
+        <label for="gcid">GitHub App client ID</label>
+        <div class="hint">From your App's settings page. Public — not a secret.</div>
+        <input type="text" id="gcid" placeholder="Iv1.… or Iv23…" value="${esc(c.clientId || '')}" spellcheck="false">
+      </div>
+      <div class="fld">
+        <label for="gpx">Token-exchange endpoint</label>
+        <div class="hint">Your deployed worker, e.g. <code>https://ops-widget-auth.you.workers.dev</code>.
+          Source is in <code>/worker</code> of this repo.</div>
+        <input type="text" id="gpx" placeholder="https://…" value="${esc(c.proxy || '')}" spellcheck="false">
+      </div>
+      <div class="note warnbox">Your App's <b>callback URL</b> must be exactly <code>${esc(REDIRECT)}</code>,
+        and the worker must allow this page's origin.</div>`;
+    foot.innerHTML = `<button class="iconbtn" id="ghappClear" style="margin-right:auto">Reset to default</button>
+      <button class="iconbtn" data-close>Cancel</button><button class="iconbtn primary" id="ghappSave">Save</button>`;
+    $('#ghappClear').onclick = () => { store.del(K.ghcfg); paintGate(); openSettings('main'); };
+    $('#ghappSave').onclick = () => {
+      const clientId = $('#gcid').value.trim(), proxy = $('#gpx').value.trim();
+      if (clientId && proxy) store.set(K.ghcfg, { clientId, proxy }); else store.del(K.ghcfg);
+      paintGate(); openSettings('main');
     };
     return;
   }
@@ -1000,16 +1126,17 @@ async function openSettings(tab = 'main') {
   }
 
   /* ---------- main ---------- */
-  const ghOn = !!GH.token(), azOn = AZ.connected();
+  const ghOn = GH.connected(), azOn = AZ.connected();
   const nRepos = store.get(K.repos, []).length;
   body.innerHTML = `
     <div class="fld">
       <label>GitHub</label>
       <div class="hint">${ghOn ? `Connected · <b>${nRepos}</b> repo${nRepos === 1 ? '' : 's'} watched` : 'Not connected'}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="iconbtn" id="mGh">${ghOn ? 'Replace token' : 'Connect GitHub'}</button>
+        <button class="iconbtn" id="mGh">${ghOn ? 'Reconnect' : (GH.canOAuth() ? 'Sign in with GitHub' : 'Connect GitHub')}</button>
         ${ghOn ? `<button class="iconbtn" id="mRepos">Choose repos</button>` : ''}
       </div>
+      <button class="linkbtn" id="mGhApp">Advanced — use your own GitHub App</button>
     </div>
     <div class="fld">
       <label>Azure</label>
@@ -1023,13 +1150,15 @@ async function openSettings(tab = 'main') {
   foot.innerHTML = `<button class="iconbtn" id="signout" style="margin-right:auto;color:var(--crit)">Sign out of everything</button>
                     <button class="iconbtn primary" data-close>Done</button>`;
 
-  $('#mGh').onclick = () => openSettings('github');
+  $('#mGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
+  $('#mGhApp').onclick = () => openSettings('ghapp');
   $('#mRepos') && ($('#mRepos').onclick = () => openSettings('repos'));
   $('#mAz').onclick = () => AZ.login();
   $('#mAzCfg') && ($('#mAzCfg').onclick = () => openSettings('azure'));
   $('#signout').onclick = () => {
     if (!confirm('Erase the GitHub token, the Azure session and all settings from this browser?')) return;
-    Object.values(K).forEach(k => { if (k !== K.theme) store.del(k); });
+    /* theme and the self-hosted-app pointer are settings, not credentials */
+    Object.values(K).forEach(k => { if (k !== K.theme && k !== K.ghcfg) store.del(k); });
     dlg.close(); location.reload();
   };
 }
@@ -1051,9 +1180,21 @@ $('#dlgX').onclick = () => dlg.close();
   };
 })();
 
+const GH_MARK = '<svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>';
+
+function paintGate() {
+  const oauth = GH.canOAuth();
+  $('#gateGh').innerHTML = GH_MARK + (oauth ? 'Sign in with GitHub' : 'Connect GitHub');
+  $('#gateGhPat').classList.toggle('hidden', !oauth);
+  $('#gateFine').innerHTML = oauth
+    ? 'One click each — no tokens to create. Whatever you connect is stored in <b>your</b> browser only, never on a server.'
+    : 'GitHub uses a token you paste once. Azure uses Microsoft sign-in — no password or secret is stored here.';
+}
+
 $('#btnRefresh').onclick = () => refreshAll(true);
 $('#btnSettings').onclick = () => openSettings('main');
-$('#gateGh').onclick = () => openSettings('github');
+$('#gateGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
+$('#gateGhPat').onclick = () => openSettings('github');
 $('#gateAz').onclick = () => AZ.login();
 
 addEventListener('resize', () => {
@@ -1066,18 +1207,19 @@ function startTick() { clearInterval(TICK); TICK = setInterval(() => { if (!docu
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshAll(false); });
 
 (async function boot() {
-  /* finish an Azure redirect if we came back with a code */
-  if (/[?#].*(code=|error=)/.test(location.href)) {
+  /* Both providers come back to this same redirect URI as ?code=, so route on
+     the state prefix rather than guessing. */
+  const qs = location.search || location.hash;
+  if (/(\?|#|&)(code|error)=/.test(qs)) {
+    const p = new URLSearchParams(qs.replace(/^[?#]/, ''));
     try {
-      await AZ.complete(location.search || location.hash);
-      history.replaceState({}, '', REDIRECT);
-      toast('Azure connected');
-    } catch (e) {
-      history.replaceState({}, '', REDIRECT);
-      toast(e.message, 6000);
-    }
+      if ((p.get('state') || '').startsWith('gh.')) { await GH.complete(p); toast('GitHub connected'); }
+      else { await AZ.complete(qs); toast('Azure connected'); }
+    } catch (e) { toast(e.message, 6000); }
+    history.replaceState({}, '', REDIRECT);
   }
-  if (!GH.token() && !AZ.connected()) { $('#gate').classList.remove('hidden'); setHealth('idle'); }
+  paintGate();
+  if (!GH.connected() && !AZ.connected()) { $('#gate').classList.remove('hidden'); setHealth('idle'); }
   await refreshAll(false);
   startTick();
 })();
