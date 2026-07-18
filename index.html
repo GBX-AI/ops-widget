@@ -271,6 +271,9 @@ textarea{min-height:74px;resize:vertical;font-family:ui-monospace,SFMono-Regular
       <h2>Deployments</h2>
       <span class="pill idle" id="ghSummary">—</span>
       <span class="meta" id="ghMeta"></span>
+      <button class="iconbtn" id="btnRepos" style="height:30px;font-size:12.5px;padding:0 10px" title="Add or remove repositories">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        Repos</button>
     </div>
     <div class="grid g-repos" id="repos"></div>
   </section>
@@ -1163,7 +1166,10 @@ async function openSettings(tab = 'main') {
       <button class="iconbtn" data-close>Cancel</button><button class="iconbtn primary" id="saveRepos">Save</button>`;
     $('#manageInstall') && ($('#manageInstall').onclick = () => window.open(GH.installUrl(), '_blank', 'noopener'));
 
-    try { repoCache ||= await GH.myRepos(); }
+    /* Always refetch. Caching across opens meant a picker opened BEFORE the App
+       was installed kept showing only public repos forever after, which reads as
+       "private repos are broken". One cheap call beats a stale list. */
+    try { repoCache = await GH.myRepos(); }
     catch (e) { $('#rlist').innerHTML = `<div class="empty" style="color:var(--crit)">${esc(e.message)}</div>`; return; }
 
     /* Private repos require the App to be installed and granted access — say so
@@ -1295,6 +1301,7 @@ function paintGate() {
 
 $('#btnRefresh').onclick = () => refreshAll(true);
 $('#btnSettings').onclick = () => openSettings('main');
+$('#btnRepos').onclick = () => { repoCache = null; openSettings('repos'); };
 $('#gateGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
 $('#gateGhPat').onclick = () => openSettings('github');
 $('#gateAzTenant').onclick = () => openSettings('azlogin');
