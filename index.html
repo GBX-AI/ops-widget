@@ -882,7 +882,29 @@ async function renderGitHub() {
 
 async function renderAzure() {
   const sec = $('#secAz');
-  if (!AZ.connected()) { sec.classList.add('hidden'); return; }
+  /* Not connected is a STATE, not a reason to vanish. Hiding the whole section
+     left no way to add Azure once GitHub was connected and the gate was gone. */
+  if (!AZ.connected()) {
+    sec.classList.remove('hidden');
+    $('#azStats').innerHTML = '';
+    $('#azMeta').textContent = '';
+    document.querySelectorAll('#secAz .g-two, #resCard').forEach(n => n.classList.add('hidden'));
+    let cta = $('#azConnectCard');
+    if (!cta) {
+      cta = el('div', 'card empty');
+      cta.id = 'azConnectCard';
+      cta.innerHTML = `<span class="em">☁️</span>See month-to-date spend, daily trend and Container App health.
+        <div style="margin-top:12px"><button class="iconbtn" id="azConnectBtn" style="height:40px">
+          <svg viewBox="0 0 23 23" width="15" height="15" aria-hidden="true"><path fill="#f35325" d="M1 1h10v10H1z"/><path fill="#81bc06" d="M12 1h10v10H12z"/><path fill="#05a6f0" d="M1 12h10v10H1z"/><path fill="#ffba08" d="M12 12h10v10H12z"/></svg>
+          Continue with Microsoft</button></div>`;
+      $('#azStats').after(cta);
+      cta.querySelector('#azConnectBtn').onclick = () => AZ.login();
+    }
+    cta.classList.remove('hidden');
+    return;
+  }
+  $('#azConnectCard')?.classList.add('hidden');
+  document.querySelectorAll('#secAz .g-two, #resCard').forEach(n => n.classList.remove('hidden'));
   sec.classList.remove('hidden');
 
   let subId = store.get(K.sub);
@@ -1029,12 +1051,14 @@ async function refreshAll(manual) {
   try {
     const jobs = [];
     if (GH.connected()) jobs.push(renderGitHub().catch(e => toast(e.message)));
-    if (AZ.connected()) jobs.push(renderAzure().catch(e => {
+    /* Run renderAzure even when disconnected — it paints the connect card, which
+       is the only Azure entry point once the gate is gone. */
+    if (GH.connected() || AZ.connected()) jobs.push(renderAzure().catch(e => {
       if (/not connected|silent|AADSTS/i.test(e.message)) {
         toast('Azure session expired — reconnect from Settings.');
       } else toast(e.message);
     }));
-    if (!jobs.length) { $('#gate').classList.remove('hidden'); setHealth('idle'); return; }
+    if (!GH.connected() && !AZ.connected()) { $('#gate').classList.remove('hidden'); setHealth('idle'); return; }
     $('#gate').classList.add('hidden');
     await Promise.all(jobs);
     if (manual) toast('Refreshed');
@@ -1358,6 +1382,12 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
         return AZ.login();
       }
       toast(e.message, 6000);
+      /* Ladder exhausted. Only NOW offer the manual directory — as a rescue for
+         the rare account, never as a step everyone has to walk through. */
+      if (azRetryable(e.message)) {
+        store.del(K.aztenant);
+        setTimeout(() => openSettings('azlogin'), 900);
+      }
     }
     history.replaceState({}, '', REDIRECT);
   }
