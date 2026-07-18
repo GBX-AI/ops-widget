@@ -330,6 +330,7 @@ if (window.parent !== window && /[?#].*code=|[?#].*error=/.test(location.href)) 
    code->token swap cannot happen in the browser; GH_AUTH_PROXY does that one
    call and nothing else. Leave these blank and the widget falls back to a PAT. */
 const GH_CLIENT_ID_DEFAULT  = 'Iv23lilfSOWfeExDGiZ6';
+const GH_APP_SLUG_DEFAULT   = 'ops-widget-dashboard';
 const GH_AUTH_PROXY_DEFAULT = 'https://ops-widget-auth.wittybeach-a8483703.centralindia.azurecontainerapps.io';
 
 const AZ_CLIENT_ID = '1b24866a-ca8b-4551-b1ed-647aadb339c5';
@@ -417,8 +418,13 @@ const GH = {
     const o = store.get(K.ghcfg, {}) || {};
     return {
       clientId: o.clientId || GH_CLIENT_ID_DEFAULT,
+      slug: o.slug || GH_APP_SLUG_DEFAULT,
       proxy: (o.proxy || GH_AUTH_PROXY_DEFAULT || '').replace(/\/+$/, '')
     };
+  },
+  installUrl() {
+    const s = GH.cfg().slug;
+    return s ? `https://github.com/apps/${s}/installations/new` : null;
   },
   canOAuth()  { const c = GH.cfg(); return !!(c.clientId && c.proxy); },
   connected() { return !!store.get(K.gh); },
@@ -491,17 +497,30 @@ const GH = {
     return res.json();
   },
   async me()     { return GH.api('/user'); },
-  /* A GitHub App user token only sees repos the app is installed on, which
-     /user/repos does not report — fall through to the installation list. */
+  /* Two different sources, and BOTH are needed — merging, not falling back.
+     A PAT sees everything through /user/repos. A GitHub App user token only
+     sees repos the app is INSTALLED on, which /user/repos under-reports (it
+     happily returns public repos, so an early return here silently hides
+     every private repo). Ask both and dedupe. */
   async myRepos() {
-    const direct = await GH.api('/user/repos?per_page=100&sort=pushed&affiliation=owner,organization_member').catch(() => null);
-    if (direct?.length) return direct;
-    const inst = await GH.api('/user/installations').catch(() => null);
-    if (!inst?.installations?.length) return direct || [];
-    const lists = await Promise.all(inst.installations.map(i =>
-      GH.api(`/user/installations/${i.id}/repositories?per_page=100`)
-        .then(d => d.repositories || []).catch(() => [])));
-    return lists.flat();
+    const [direct, inst] = await Promise.all([
+      GH.api('/user/repos?per_page=100&sort=pushed&affiliation=owner,organization_member').catch(() => []),
+      GH.api('/user/installations').catch(() => null),
+    ]);
+    let all = Array.isArray(direct) ? direct.slice() : [];
+    const installs = inst?.installations || [];
+    if (installs.length) {
+      const lists = await Promise.all(installs.map(i =>
+        GH.api(`/user/installations/${i.id}/repositories?per_page=100`)
+          .then(d => d.repositories || []).catch(() => [])));
+      all = all.concat(lists.flat());
+    }
+    const seen = new Set();
+    const repos = all.filter(r => r?.full_name && !seen.has(r.full_name) && seen.add(r.full_name))
+      .sort((a, b) => new Date(b.pushed_at || 0) - new Date(a.pushed_at || 0));
+    repos.installCount = installs.length;
+    repos.privateCount = repos.filter(r => r.private).length;
+    return repos;
   },
   /* latest run per workflow + the last successful run per workflow */
   async repoRuns(full) {
@@ -1066,12 +1085,24 @@ async function openSettings(tab = 'main') {
 
   /* ---------- repo picker ---------- */
   if (tab === 'repos') {
-    body.innerHTML = `<div class="fld"><input type="text" id="rq" placeholder="Filter repositories…" autocomplete="off"></div>
+    body.innerHTML = `<div id="instNote"></div>
+      <div class="fld"><input type="text" id="rq" placeholder="Filter repositories…" autocomplete="off"></div>
       <div id="rlist"><div class="empty">Loading your repositories…</div></div>`;
-    foot.innerHTML = `<button class="iconbtn" data-close>Cancel</button><button class="iconbtn primary" id="saveRepos">Save</button>`;
+    foot.innerHTML = `${GH.installUrl() ? `<button class="iconbtn" id="manageInstall" style="margin-right:auto">Add private repos</button>` : ''}
+      <button class="iconbtn" data-close>Cancel</button><button class="iconbtn primary" id="saveRepos">Save</button>`;
+    $('#manageInstall') && ($('#manageInstall').onclick = () => window.open(GH.installUrl(), '_blank', 'noopener'));
 
     try { repoCache ||= await GH.myRepos(); }
     catch (e) { $('#rlist').innerHTML = `<div class="empty" style="color:var(--crit)">${esc(e.message)}</div>`; return; }
+
+    /* Private repos require the App to be installed and granted access — say so
+       plainly rather than letting the list look mysteriously incomplete. */
+    if (GH.installUrl() && !repoCache.privateCount) {
+      $('#instNote').innerHTML = `<div class="note warnbox" style="margin-bottom:14px">
+        <b>Only seeing public repos?</b> A GitHub App can read only the repositories you
+        explicitly grant it. <a href="${esc(GH.installUrl())}" target="_blank" rel="noopener">Install it and pick your repos ↗</a>,
+        then reopen this list.</div>`;
+    }
 
     const chosen = new Set(store.get(K.repos, []));
     const paint = (q = '') => {
@@ -1088,7 +1119,7 @@ async function openSettings(tab = 'main') {
     };
     paint();
     $('#rq').oninput = e => paint(e.target.value);
-    $('#saveRepos').onclick = () => { store.set(K.repos, [...chosen]); dlg.close(); refreshAll(true); };
+    $('#saveRepos').onclick = () => { repoCache = null; store.set(K.repos, [...chosen]); dlg.close(); refreshAll(true); };
     return;
   }
 
