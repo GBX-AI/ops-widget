@@ -81,13 +81,14 @@ Opening the file directly via `file://` works for the GitHub panel but **not** f
 2. Create your own Azure app registration and swap `AZ_CLIENT_ID` in `index.html`:
 
 ```bash
-appId=$(az ad app create --display-name "Ops Widget" \
-  --sign-in-audience AzureADMultipleOrgs --query appId -o tsv)
+appId=$(az ad app create --display-name "Ops Widget" --query appId -o tsv)
 objId=$(az ad app show --id "$appId" --query id -o tsv)
 az rest --method PATCH \
   --uri "https://graph.microsoft.com/v1.0/applications/$objId" \
   --headers "Content-Type=application/json" \
   --body '{
+    "api":{"requestedAccessTokenVersion":2},
+    "signInAudience":"AzureADandPersonalMicrosoftAccount",
     "spa":{"redirectUris":["https://YOUR-ORG.github.io/ops-widget/","http://localhost:8080/"]},
     "requiredResourceAccess":[{
       "resourceAppId":"797f4846-ba00-4fd7-ba43-dac1f8f63013",
@@ -97,6 +98,11 @@ echo "$appId"
 ```
 
 `797f4846-…` is the Azure Service Management API; `41094075-…` is its `user_impersonation` scope.
+
+Two details that will cost you an hour if you miss them:
+
+- **`AzureADandPersonalMicrosoftAccount`, not `AzureADMultipleOrgs`.** Azure subscriptions are very often owned by a personal Microsoft account (`@outlook.com`). A work/school-only registration rejects those with *"You can't sign in here with a personal account"* — and the matching authority must then be `/common`, not `/organizations`.
+- **`requestedAccessTokenVersion: 2` must be set in the same request**, or Entra refuses the audience change with `AccessTokenAcceptedVersion`.
 
 ---
 
