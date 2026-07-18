@@ -251,6 +251,7 @@ textarea{min-height:74px;resize:vertical;font-family:ui-monospace,SFMono-Regular
         Continue with Microsoft</button>
     </div>
     <button class="linkbtn hidden" id="gateGhPat">Use a personal access token instead</button>
+    <button class="linkbtn" id="gateAzTenant">Azure rejected your account? Set your directory</button>
     <p class="fine" id="gateFine"></p>
   </section>
 
@@ -334,17 +335,23 @@ const GH_APP_SLUG_DEFAULT   = 'ops-widget-dashboard';
 const GH_AUTH_PROXY_DEFAULT = 'https://ops-widget-auth.wittybeach-a8483703.centralindia.azurecontainerapps.io';
 
 const AZ_CLIENT_ID = '1b24866a-ca8b-4551-b1ed-647aadb339c5';
-/* /common — not /organizations. Azure subscriptions are frequently owned by a
-   personal Microsoft account (outlook.com/live.com), and /organizations rejects
-   those outright with "You can't sign in here with a personal account". */
-const AZ_AUTHORITY = 'https://login.microsoftonline.com/common';
+/* Which directory to sign in against.
+   NOT /common: a personal Microsoft account (outlook.com/live.com) signs in
+   there under its CONSUMER identity, and Azure Resource Manager is not a valid
+   resource for that identity — Entra then rejects it with "You can't sign in
+   here with a personal account", which reads like the account is wrong when the
+   authority is. /organizations forces the work-or-school context that ARM needs.
+   An MSA that owns a subscription must use its backing tenant id explicitly. */
+const AZ_TENANT_DEFAULT = 'organizations';
+const azTenant   = () => store.get(K.aztenant) || AZ_TENANT_DEFAULT;
+const azAuthority = () => `https://login.microsoftonline.com/${azTenant()}`;
 const AZ_SCOPE     = 'https://management.azure.com/user_impersonation offline_access openid profile';
 const REDIRECT     = location.origin + location.pathname;
 const REFRESH_MS   = 60_000;
 
 const K = {
   gh:'gbxops.gh', repos:'gbxops.repos', az:'gbxops.az', pkce:'gbxops.pkce',
-  sub:'gbxops.sub', credit:'gbxops.credit', theme:'gbxops.theme',
+  sub:'gbxops.sub', aztenant:'gbxops.aztenant', credit:'gbxops.credit', theme:'gbxops.theme',
   ghcfg:'gbxops.ghcfg', oauth:'gbxops.oauth'
 };
 
@@ -556,7 +563,7 @@ const AZ = {
     const { v, c } = await pkce();
     const state = 'az.' + b64url(crypto.getRandomValues(new Uint8Array(12)));
     store.set(K.pkce, { v, state });
-    location.assign(`${AZ_AUTHORITY}/oauth2/v2.0/authorize?` + new URLSearchParams({
+    location.assign(`${azAuthority()}/oauth2/v2.0/authorize?` + new URLSearchParams({
       client_id: AZ_CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT,
       scope: AZ_SCOPE, code_challenge: c, code_challenge_method: 'S256',
       state, prompt: 'select_account'
@@ -564,7 +571,7 @@ const AZ = {
   },
 
   async exchange(body) {
-    const res = await fetch(`${AZ_AUTHORITY}/oauth2/v2.0/token`, {
+    const res = await fetch(`${azAuthority()}/oauth2/v2.0/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ client_id: AZ_CLIENT_ID, redirect_uri: REDIRECT, ...body })
@@ -593,7 +600,7 @@ const AZ = {
   async silent() {
     const { v, c } = await pkce();
     const state = 'az.' + b64url(crypto.getRandomValues(new Uint8Array(12)));
-    const url = `${AZ_AUTHORITY}/oauth2/v2.0/authorize?` + new URLSearchParams({
+    const url = `${azAuthority()}/oauth2/v2.0/authorize?` + new URLSearchParams({
       client_id: AZ_CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT,
       scope: AZ_SCOPE, code_challenge: c, code_challenge_method: 'S256',
       state, prompt: 'none'
@@ -1052,6 +1059,34 @@ async function openSettings(tab = 'main') {
     return;
   }
 
+  /* ---------- which Entra directory to sign in against ---------- */
+  if (tab === 'aztenant') {
+    body.innerHTML = `
+      <div class="note warnbox" style="margin-bottom:15px">
+        Seeing <b>“You can’t sign in here with a personal account”</b>? That message is
+        misleading — your account is fine, but Azure Resource Manager can’t be reached
+        through a personal (outlook.com / live.com) identity. Sign in against the
+        <b>directory that owns your subscription</b> instead.
+      </div>
+      <div class="fld">
+        <label for="tid">Directory (tenant) ID or domain</label>
+        <div class="hint">A GUID, or a domain like <code>contoso.onmicrosoft.com</code>.
+          Find it with <code>az account show --query tenantId -o tsv</code>, or in the Azure
+          portal under <b>Microsoft Entra ID → Overview</b>.<br>
+          Leave blank to use <code>organizations</code>, which suits most work/school accounts.</div>
+        <input type="text" id="tid" spellcheck="false" placeholder="organizations"
+               value="${esc(store.get(K.aztenant) || '')}">
+      </div>`;
+    foot.innerHTML = `<button class="iconbtn" data-close>Cancel</button>
+      <button class="iconbtn primary" id="saveTid">Save &amp; sign in</button>`;
+    $('#saveTid').onclick = () => {
+      const v = $('#tid').value.trim();
+      if (v) store.set(K.aztenant, v); else store.del(K.aztenant);
+      dlg.close(); AZ.login();
+    };
+    return;
+  }
+
   /* ---------- point at a self-hosted GitHub App + worker ---------- */
   if (tab === 'ghapp') {
     const c = store.get(K.ghcfg, {}) || {};
@@ -1226,6 +1261,7 @@ $('#btnRefresh').onclick = () => refreshAll(true);
 $('#btnSettings').onclick = () => openSettings('main');
 $('#gateGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
 $('#gateGhPat').onclick = () => openSettings('github');
+$('#gateAzTenant').onclick = () => openSettings('aztenant');
 $('#gateAz').onclick = () => AZ.login();
 
 addEventListener('resize', () => {
