@@ -174,6 +174,16 @@ svg.plot{display:block;width:100%;overflow:visible;touch-action:pan-y}
 .gate p{color:var(--ink2);font-size:14px;margin:0 0 18px}
 .gate .row{display:flex;flex-direction:column;gap:9px}
 .gate .fine{font-size:12px;color:var(--muted);margin-top:16px;line-height:1.55}
+.choice{display:flex;gap:12px;align-items:flex-start;width:100%;text-align:left;
+  padding:13px 14px;border-radius:12px;border:1px solid var(--ring);background:var(--plane);
+  cursor:pointer;margin-bottom:10px;transition:border-color .15s,background .15s}
+.choice:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 6%,var(--plane))}
+.choice.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);
+  background:color-mix(in srgb,var(--accent) 8%,var(--plane))}
+.choice .ic{font-size:19px;line-height:1.2;flex:none}
+.choice .tx{min-width:0}
+.choice .tx b{display:block;font-size:14px;margin-bottom:3px}
+.choice .tx i{display:block;font-style:normal;font-size:12.5px;color:var(--muted);line-height:1.5}
 .linkbtn{background:none;border:0;padding:8px 4px;margin-top:10px;cursor:pointer;
   font-size:12.5px;color:var(--muted);text-decoration:underline;text-underline-offset:3px}
 .linkbtn:hover{color:var(--ink2)}
@@ -783,6 +793,7 @@ function spark(pts, w = 78, h = 24) {
 
 /* ======================================================= RENDER =========== */
 let TICK = null;
+let justConnectedGh = false;
 
 function setHealth(state) {
   const c = { good: 'var(--good)', crit: 'var(--crit)', run: 'var(--accent)', idle: 'var(--muted)' }[state] || 'var(--muted)';
@@ -1026,7 +1037,7 @@ let repoCache = null;
 async function openSettings(tab = 'main') {
   const body = $('#dlgBody'), foot = $('#dlgFoot');
   $('#dlgTitle').textContent = { main: 'Settings', repos: 'Choose repositories', azure: 'Azure',
-    github: 'Connect GitHub', ghapp: 'Your own GitHub App' }[tab] || 'Settings';
+    github: 'Connect GitHub', ghapp: 'Your own GitHub App', azlogin: 'Connect Azure' }[tab] || 'Settings';
   body.innerHTML = ''; foot.innerHTML = '';
   if (!dlg.open) dlg.showModal();
 
@@ -1059,29 +1070,54 @@ async function openSettings(tab = 'main') {
     return;
   }
 
-  /* ---------- which Entra directory to sign in against ---------- */
-  if (tab === 'aztenant') {
+  /* ---------- account type -> directory, asked BEFORE sign-in ----------
+     Segregating up front is the whole point: a personal account sent to the
+     wrong authority gets told "you can't sign in here with a personal account",
+     which blames the account and leaves the user with nowhere to go. */
+  if (tab === 'azlogin') {
+    const cur = store.get(K.aztenant) || '';
     body.innerHTML = `
-      <div class="note warnbox" style="margin-bottom:15px">
-        Seeing <b>“You can’t sign in here with a personal account”</b>? That message is
-        misleading — your account is fine, but Azure Resource Manager can’t be reached
-        through a personal (outlook.com / live.com) identity. Sign in against the
-        <b>directory that owns your subscription</b> instead.
-      </div>
-      <div class="fld">
-        <label for="tid">Directory (tenant) ID or domain</label>
-        <div class="hint">A GUID, or a domain like <code>contoso.onmicrosoft.com</code>.
-          Find it with <code>az account show --query tenantId -o tsv</code>, or in the Azure
-          portal under <b>Microsoft Entra ID → Overview</b>.<br>
-          Leave blank to use <code>organizations</code>, which suits most work/school accounts.</div>
-        <input type="text" id="tid" spellcheck="false" placeholder="organizations"
-               value="${esc(store.get(K.aztenant) || '')}">
+      <p style="margin:0 0 15px;font-size:13.5px;color:var(--ink2);line-height:1.55">
+        Which kind of Microsoft account is this? It decides which directory we sign in
+        against — and getting it right now avoids a confusing rejection later.</p>
+      <button class="choice ${cur ? '' : 'sel'}" id="cWork" type="button">
+        <span class="ic">🏢</span><span class="tx"><b>Work or school account</b>
+          <i>you@yourcompany.com — signs in through your organisation's directory.
+             This covers most Azure users.</i></span></button>
+      <button class="choice ${cur ? 'sel' : ''}" id="cPersonal" type="button">
+        <span class="ic">👤</span><span class="tx"><b>Personal Microsoft account</b>
+          <i>outlook.com, live.com or hotmail.com. Your subscription still lives in a
+             directory, so we need its ID — once.</i></span></button>
+      <div id="tidWrap" class="${cur ? '' : 'hidden'}" style="margin-top:14px">
+        <div class="fld">
+          <label for="tid">Directory (tenant) ID or domain</label>
+          <div class="hint">Run <code>az account show --query tenantId -o tsv</code>, or find it in
+            the Azure portal under <b>Microsoft Entra ID → Overview</b>.</div>
+          <input type="text" id="tid" spellcheck="false"
+                 placeholder="00000000-0000-0000-0000-000000000000" value="${esc(cur)}">
+        </div>
+        <div class="note">Azure Resource Manager can't be reached through a consumer identity.
+          Signing in against the directory that owns the subscription is what makes it work —
+          your account is not the problem.</div>
       </div>`;
     foot.innerHTML = `<button class="iconbtn" data-close>Cancel</button>
-      <button class="iconbtn primary" id="saveTid">Save &amp; sign in</button>`;
-    $('#saveTid').onclick = () => {
-      const v = $('#tid').value.trim();
-      if (v) store.set(K.aztenant, v); else store.del(K.aztenant);
+      <button class="iconbtn primary" id="azGo">Continue to Microsoft</button>`;
+
+    let personal = !!cur;
+    const paint = () => {
+      $('#cWork').classList.toggle('sel', !personal);
+      $('#cPersonal').classList.toggle('sel', personal);
+      $('#tidWrap').classList.toggle('hidden', !personal);
+      if (personal) setTimeout(() => $('#tid')?.focus(), 30);
+    };
+    $('#cWork').onclick = () => { personal = false; paint(); };
+    $('#cPersonal').onclick = () => { personal = true; paint(); };
+    $('#azGo').onclick = () => {
+      if (personal) {
+        const v = $('#tid').value.trim();
+        if (!v) { toast('Enter your directory (tenant) ID to continue'); $('#tid').focus(); return; }
+        store.set(K.aztenant, v);
+      } else store.del(K.aztenant);   // fall back to /organizations
       dlg.close(); AZ.login();
     };
     return;
@@ -1219,7 +1255,7 @@ async function openSettings(tab = 'main') {
   $('#mGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
   $('#mGhApp').onclick = () => openSettings('ghapp');
   $('#mRepos') && ($('#mRepos').onclick = () => openSettings('repos'));
-  $('#mAz').onclick = () => AZ.login();
+  $('#mAz').onclick = () => openSettings('azlogin');
   $('#mAzCfg') && ($('#mAzCfg').onclick = () => openSettings('azure'));
   $('#signout').onclick = () => {
     if (!confirm('Erase the GitHub token, the Azure session and all settings from this browser?')) return;
@@ -1261,8 +1297,8 @@ $('#btnRefresh').onclick = () => refreshAll(true);
 $('#btnSettings').onclick = () => openSettings('main');
 $('#gateGh').onclick = () => { if (GH.canOAuth()) GH.login(); else openSettings('github'); };
 $('#gateGhPat').onclick = () => openSettings('github');
-$('#gateAzTenant').onclick = () => openSettings('aztenant');
-$('#gateAz').onclick = () => AZ.login();
+$('#gateAzTenant').onclick = () => openSettings('azlogin');
+$('#gateAz').onclick = () => openSettings('azlogin');
 
 addEventListener('resize', () => {
   clearTimeout(window._rz);
@@ -1286,9 +1322,11 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
     try {
       if (p.get('installation_id') || p.get('setup_action')) {
         repoCache = null;   // the install changed which repos are visible
+        justConnectedGh = true;
         toast('GitHub App installed — your repositories are available now');
       } else if (st.startsWith('gh.')) {
-        await GH.complete(p); repoCache = null; toast('GitHub connected');
+        await GH.complete(p); repoCache = null; justConnectedGh = true;
+        toast('GitHub connected');
       } else if (st.startsWith('az.')) {
         await AZ.complete(qs); toast('Azure connected');
       }
@@ -1299,6 +1337,13 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
   if (!GH.connected() && !AZ.connected()) { $('#gate').classList.remove('hidden'); setHealth('idle'); }
   await refreshAll(false);
   startTick();
+
+  /* Nothing is ever watched until the user picks it. Right after connecting,
+     open the picker rather than leaving them on an empty dashboard wondering
+     what to do next. */
+  if (justConnectedGh && GH.connected() && !store.get(K.repos, []).length) {
+    openSettings('repos');
+  }
 })();
 </script>
 </body>
