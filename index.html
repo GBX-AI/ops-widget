@@ -554,7 +554,7 @@ const AZ = {
 
   async login() {
     const { v, c } = await pkce();
-    const state = b64url(crypto.getRandomValues(new Uint8Array(12)));
+    const state = 'az.' + b64url(crypto.getRandomValues(new Uint8Array(12)));
     store.set(K.pkce, { v, state });
     location.assign(`${AZ_AUTHORITY}/oauth2/v2.0/authorize?` + new URLSearchParams({
       client_id: AZ_CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT,
@@ -592,7 +592,7 @@ const AZ = {
      prompt=none iframe, which succeeds while the Microsoft session cookie lives. */
   async silent() {
     const { v, c } = await pkce();
-    const state = b64url(crypto.getRandomValues(new Uint8Array(12)));
+    const state = 'az.' + b64url(crypto.getRandomValues(new Uint8Array(12)));
     const url = `${AZ_AUTHORITY}/oauth2/v2.0/authorize?` + new URLSearchParams({
       client_id: AZ_CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT,
       scope: AZ_SCOPE, code_challenge: c, code_challenge_method: 'S256',
@@ -1238,14 +1238,24 @@ function startTick() { clearInterval(TICK); TICK = setInterval(() => { if (!docu
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshAll(false); });
 
 (async function boot() {
-  /* Both providers come back to this same redirect URI as ?code=, so route on
-     the state prefix rather than guessing. */
+  /* THREE different things land on this one redirect URI and must be told apart
+     EXPLICITLY — never by "else, assume Azure". A GitHub App *install* redirect
+     carries installation_id/setup_action plus a code, but no state of ours;
+     routing that to Azure posts a GitHub code to Entra and shows the user a raw
+     AADSTS9002313. Anything unrecognised is ignored rather than guessed at. */
   const qs = location.search || location.hash;
-  if (/(\?|#|&)(code|error)=/.test(qs)) {
+  if (/(\?|#|&)(code|error|installation_id|setup_action)=/.test(qs)) {
     const p = new URLSearchParams(qs.replace(/^[?#]/, ''));
+    const st = p.get('state') || '';
     try {
-      if ((p.get('state') || '').startsWith('gh.')) { await GH.complete(p); toast('GitHub connected'); }
-      else { await AZ.complete(qs); toast('Azure connected'); }
+      if (p.get('installation_id') || p.get('setup_action')) {
+        repoCache = null;   // the install changed which repos are visible
+        toast('GitHub App installed — your repositories are available now');
+      } else if (st.startsWith('gh.')) {
+        await GH.complete(p); repoCache = null; toast('GitHub connected');
+      } else if (st.startsWith('az.')) {
+        await AZ.complete(qs); toast('Azure connected');
+      }
     } catch (e) { toast(e.message, 6000); }
     history.replaceState({}, '', REDIRECT);
   }
